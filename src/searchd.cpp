@@ -96,6 +96,10 @@ extern "C"
 
 /////////////////////////////////////////////////////////////////////////////
 
+#ifndef INT_MAX
+	#define INT_MAX 2147483647
+#endif
+
 enum ProtocolType_e
 {
 	PROTO_SPHINX = 0,
@@ -179,9 +183,9 @@ static int				g_iMaxCachedDocs	= 0;	// in bytes
 static int				g_iMaxCachedHits	= 0;	// in bytes
 
 static int				g_iAttrFlushPeriod	= 0;			// in seconds; 0 means "do not flush"
-int				g_iMaxPacketSize	= 8*1024*1024;	// in bytes; for both query packets from clients and response packets from agents
+int						g_iMaxPacketSize	= INT_MAX;	// in bytes; for both query packets from clients and response packets from agents
 static int				g_iMaxFilters		= 256;
-static int				g_iMaxFilterValues	= 4096;
+static int				g_iMaxFilterValues	= INT_MAX;
 static int				g_iMaxBatchQueries	= 32;
 static ESphCollation	g_eCollation = SPH_COLLATION_DEFAULT;
 static CSphString		g_sSnippetsFilePrefix;
@@ -21037,14 +21041,14 @@ int WINAPI ServiceMain ( int argc, char **argv )
 		sphWarning ( "no poll or epoll found, thread pool unavailable, going back to thread workers" );
 #endif
 	}
-	if ( g_iMaxPacketSize<128*1024 || g_iMaxPacketSize>128*1024*1024 )
-		sphFatal ( "max_packet_size out of bounds (128K..128M)" );
+	if ( g_iMaxPacketSize<128*1024 )
+		sphFatal ( "max_packet_size out of bounds (128K..)" );
 
 	if ( g_iMaxFilters<1 || g_iMaxFilters>10240 )
 		sphFatal ( "max_filters out of bounds (1..10240)" );
 
-	if ( g_iMaxFilterValues<1 || g_iMaxFilterValues>10485760 )
-		sphFatal ( "max_filter_values out of bounds (1..10485760)" );
+	if ( g_iMaxFilterValues<1 )
+		sphFatal ( "max_filter_values out of bounds (1..)" );
 
 	bool bVisualLoad = true;
 	bool bWatched = false;
