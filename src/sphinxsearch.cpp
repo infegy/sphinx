@@ -1073,6 +1073,8 @@ public:
 	virtual void				SetTermDupes ( const ExtQwordsHash_t & , int ) {}
 	virtual bool				InitState ( const CSphQueryContext &, CSphString & )	{ return true; }
 
+	virtual void				FinalizeCache ( const ISphSchema & tSorterSchema );
+
 public:
 	// FIXME? hide and friend?
 	virtual SphZoneHit_e		IsInZone ( int iZone, const ExtHit_t * pHit, int * pLastSpan );
@@ -1233,6 +1235,46 @@ static ISphQword * CreateQueryWord ( const XQKeyword_t & tWord, const ISphQwordS
 	return pWord;
 }
 
+struct AtomPosQWord_fn
+{
+	bool operator () ( ISphQword * ) const { return true; }
+};
+
+struct AtomPosExtNode_fn
+{
+	bool operator () ( ExtNode_i * pNode ) const { return !pNode->GotHitless(); }
+};
+
+template <typename T, typename NODE_CHECK>
+int CountAtomPos ( const CSphVector<T *> & dNodes, const NODE_CHECK & fnCheck )
+{
+	if ( dNodes.GetLength()<2 )
+		return dNodes.GetLength();
+
+	int iMinPos = INT_MAX;
+	int iMaxPos = 0;
+	ARRAY_FOREACH ( i, dNodes )
+	{
+		T * pNode = dNodes[i];
+		if ( fnCheck ( pNode ) )
+		{
+			iMinPos = Min ( pNode->m_iAtomPos, iMinPos );
+			iMaxPos = Max ( pNode->m_iAtomPos, iMaxPos );
+		}
+	}
+	if ( iMinPos==INT_MAX )
+		return 0;
+
+	CSphBitvec dAtomPos ( iMaxPos - iMinPos + 1 );
+	ARRAY_FOREACH ( i, dNodes )
+	{
+		if ( fnCheck ( dNodes[i] ) )
+			dAtomPos.BitSet ( dNodes[i]->m_iAtomPos - iMinPos );
+	}
+
+	return dAtomPos.BitCount();
+}
+
 
 template < typename T >
 static ExtNode_i * CreateMultiNode ( const XQNode_t * pQueryNode, const ISphQwordSetup & tSetup, bool bNeedsHitlist )
@@ -1244,29 +1286,48 @@ static ExtNode_i * CreateMultiNode ( const XQNode_t * pQueryNode, const ISphQwor
 	if ( pQueryNode->m_dChildren.GetLength() )
 	{
 		CSphVector<ExtNode_i *> dNodes;
+		CSphVector<ExtNode_i *> dTerms;
 		ARRAY_FOREACH ( i, pQueryNode->m_dChildren )
 		{
 			ExtNode_i * pTerm = ExtNode_i::Create ( pQueryNode->m_dChildren[i], tSetup );
 			assert ( !pTerm || pTerm->m_iAtomPos>=0 );
 			if ( pTerm )
-				dNodes.Add ( pTerm );
+			{
+				if ( !pTerm->GotHitless() )
+					dNodes.Add ( pTerm );
+				else
+					dTerms.Add ( pTerm );
+			}
 		}
 
-		if ( dNodes.GetLength()<2 )
+		int iAtoms = CountAtomPos ( dNodes, AtomPosExtNode_fn() );
+		if ( iAtoms<2 )
 		{
 			ARRAY_FOREACH ( i, dNodes )
 				SafeDelete ( dNodes[i] );
+			ARRAY_FOREACH ( i, dTerms )
+				SafeDelete ( dTerms[i] );
 			if ( tSetup.m_pWarning )
-				tSetup.m_pWarning->SetSprintf ( "can't create phrase node, hitlists unavailable (hitlists=%d, nodes=%d)", dNodes.GetLength(), pQueryNode->m_dChildren.GetLength() );
+				tSetup.m_pWarning->SetSprintf ( "can't create phrase node, hitlists unavailable (hitlists=%d, nodes=%d)", iAtoms, pQueryNode->m_dChildren.GetLength() );
 			return NULL;
 		}
 
 		// FIXME! tricky combo again
 		// quorum+expand used KeywordsEqual() path to drill down until actual nodes
 		ExtNode_i * pResult = new T ( dNodes, *pQueryNode, tSetup );
+
+		// AND result with the words that had no hitlist
+		if ( dTerms.GetLength () )
+		{
+			pResult = new ExtAnd_c ( pResult, dTerms[0], tSetup );
+			for ( int i=1; i<dTerms.GetLength (); i++ )
+				pResult = new ExtAnd_c ( pResult, dTerms[i], tSetup );
+		}
+
 		if ( pQueryNode->GetCount() )
 			return tSetup.m_pNodeCache->CreateProxy ( pResult, pQueryNode, tSetup );
-		return pResult; // FIXME! sorry, no hitless vs expand vs phrase support for now!
+
+		return pResult;
 	}
 
 	//////////////////////
@@ -1289,7 +1350,8 @@ static ExtNode_i * CreateMultiNode ( const XQNode_t * pQueryNode, const ISphQwor
 	}
 
 	// see if we can create the node
-	if ( dQwordsHit.GetLength()<2 )
+	int iAtoms = CountAtomPos ( dQwordsHit, AtomPosQWord_fn() );
+	if ( iAtoms<2 )
 	{
 		ARRAY_FOREACH ( i, dQwords )
 			SafeDelete ( dQwords[i] );
@@ -1297,7 +1359,7 @@ static ExtNode_i * CreateMultiNode ( const XQNode_t * pQueryNode, const ISphQwor
 			SafeDelete ( dQwordsHit[i] );
 		if ( tSetup.m_pWarning )
 			tSetup.m_pWarning->SetSprintf ( "can't create phrase node, hitlists unavailable (hitlists=%d, nodes=%d)",
-				dQwordsHit.GetLength(), dWords.GetLength() );
+				iAtoms, dWords.GetLength() );
 		return NULL;
 
 	} else
@@ -1427,8 +1489,11 @@ private:
 	ExtPayloadKeyword_t				m_tWord;
 	FieldMask_t						m_dFieldMask;
 
-	int		m_iCurDocsEnd;		///< end of the last docs chunk returned, exclusive, ie [begin,end)
-	int		m_iCurHit;			///< end of the last hits chunk (within the last docs chunk) returned, exclusive
+	int								m_iCurDocsEnd;		///< end of the last docs chunk returned, exclusive, ie [begin,end)
+	int								m_iCurHit;			///< end of the last hits chunk (within the last docs chunk) returned, exclusive
+
+	int64_t							m_iMaxTimer;		///< work until this timestamp
+	CSphString *					m_pWarning;
 
 public:
 	explicit						ExtPayload_c ( const XQNode_t * pNode, const ISphQwordSetup & tSetup );
@@ -1473,6 +1538,9 @@ ExtPayload_c::ExtPayload_c ( const XQNode_t * pNode, const ISphQwordSetup & tSet
 	m_tWord.m_fIDF = -1.0f;
 	m_tWord.m_iDocs = 0;
 	m_tWord.m_iHits = 0;
+
+	m_pWarning = tSetup.m_pWarning;
+	m_iMaxTimer = tSetup.m_iMaxTimer;
 
 	PopulateCache ( tSetup, true );
 }
@@ -1555,6 +1623,7 @@ void ExtPayload_c::PopulateCache ( const ISphQwordSetup & tSetup, bool bFillStat
 
 void ExtPayload_c::Reset ( const ISphQwordSetup & tSetup )
 {
+	m_iMaxTimer = tSetup.m_iMaxTimer;
 	m_dCache.Resize ( 0 );
 	PopulateCache ( tSetup, false );
 }
@@ -1565,6 +1634,22 @@ const ExtDoc_t * ExtPayload_c::GetDocsChunk()
 	m_iCurHit = m_iCurDocsEnd;
 	if ( m_iCurDocsEnd>=m_dCache.GetLength() )
 		return NULL;
+
+	// max_query_time
+	if ( m_iMaxTimer>0 && sphMicroTimer()>=m_iMaxTimer )
+	{
+		if ( m_pWarning )
+			*m_pWarning = "query time exceeded max_query_time";
+		return NULL;
+	}
+
+	// interrupt by sitgerm
+	if ( ExtTerm_c::m_bInterruptNow )
+	{
+		if ( m_pWarning )
+			*m_pWarning = "Server shutdown in progress";
+		return NULL;
+	}
 
 	int iDoc = 0;
 	int iEnd = m_iCurDocsEnd; // shortcut, and vs2005 optimization
@@ -1772,8 +1857,14 @@ ExtNode_i * ExtNode_i::Create ( const XQNode_t * pNode, const ISphQwordSetup & t
 		assert ( iChildren>0 );
 
 		// special case, operator BEFORE
-		if ( pNode->GetOp()==SPH_QUERY_BEFORE )
+		if ( pNode->GetOp ()==SPH_QUERY_BEFORE )
+		{
+			// before operator can not handle ZONESPAN
+			bool bZoneSpan = ARRAY_ANY ( bZoneSpan, pNode->m_dChildren, pNode->m_dChildren[_any]->m_dSpec.m_bZoneSpan );
+			if ( bZoneSpan && tSetup.m_pWarning )
+				tSetup.m_pWarning->SetSprintf ( "BEFORE operator is incompatible with ZONESPAN, ZONESPAN ignored" );
 			return CreateOrderNode ( pNode, tSetup );
+		}
 
 		// special case, AND over terms (internally reordered for speed)
 		bool bAndTerms = ( pNode->GetOp()==SPH_QUERY_AND );
@@ -5454,8 +5545,6 @@ ExtRanker_c::ExtRanker_c ( const XQQuery_t & tXQ, const ISphQwordSetup & tSetup 
 
 ExtRanker_c::~ExtRanker_c ()
 {
-	if ( m_pQcacheEntry )
-		QcacheAdd ( m_pCtx->m_tQuery, m_pQcacheEntry );
 	SafeRelease ( m_pQcacheEntry );
 
 	SafeDelete ( m_pRoot );
@@ -5509,6 +5598,15 @@ void ExtRanker_c::UpdateQcache ( int iMatches )
 	if ( m_pQcacheEntry )
 		for ( int i=0; i<iMatches; i++ )
 			m_pQcacheEntry->Append ( m_dMatches[i].m_uDocID, m_dMatches[i].m_iWeight );
+}
+
+
+void ExtRanker_c::FinalizeCache ( const ISphSchema & tSorterSchema )
+{
+	if ( m_pQcacheEntry )
+		QcacheAdd ( m_pCtx->m_tQuery, m_pQcacheEntry, tSorterSchema );
+
+	SafeRelease ( m_pQcacheEntry );
 }
 
 
@@ -6613,12 +6711,10 @@ public:
 
 private:
 	int				m_iElementSize;
-	int				m_iNextFree;
 
 	CSphFixedVector<BYTE>	m_dPool;
-	CSphTightVector<int>	m_dFree;
 	SphFactorHash_t			m_dHash;
-
+	CSphFreeList			m_dFree;
 	SphFactorHashEntry_t * Find ( SphDocID_t uId ) const;
 	inline DWORD	HashFunc ( SphDocID_t uId ) const;
 	bool			FlushEntry ( SphFactorHashEntry_t * pEntry );
@@ -6627,7 +6723,6 @@ private:
 
 FactorPool_c::FactorPool_c ()
 	: m_iElementSize	( 0 )
-	, m_iNextFree		( 0 )
 	, m_dPool ( 0 )
 	, m_dHash ( 0 )
 {
@@ -6640,7 +6735,7 @@ void FactorPool_c::Prealloc ( int iElementSize, int nElements )
 
 	m_dPool.Reset ( nElements*GetIntElementSize() );
 	m_dHash.Reset ( nElements );
-	m_dFree.Reserve ( nElements );
+	m_dFree.Reset ( nElements );
 
 	memset ( m_dHash.Begin(), 0, sizeof(m_dHash[0])*m_dHash.GetLength() );
 }
@@ -6648,17 +6743,9 @@ void FactorPool_c::Prealloc ( int iElementSize, int nElements )
 
 BYTE * FactorPool_c::Alloc ()
 {
-	if ( m_dFree.GetLength() )
-	{
-		int iIndex = m_dFree.Pop();
-		return m_dPool.Begin() + iIndex*GetIntElementSize();
-	}
-
-	assert ( m_iNextFree<=m_dPool.GetLength() / GetIntElementSize() );
-
-	BYTE * pAllocated = m_dPool.Begin()+m_iNextFree*GetIntElementSize();
-	m_iNextFree++;
-	return pAllocated;
+	int iIndex = m_dFree.Get();
+	assert ( iIndex>=0 && iIndex*GetIntElementSize()<m_dPool.GetLength() );
+	return m_dPool.Begin() + iIndex * GetIntElementSize();
 }
 
 
@@ -6671,7 +6758,7 @@ void FactorPool_c::Free ( BYTE * pPtr )
 	assert ( pPtr>=m_dPool.Begin() && pPtr<&( m_dPool.Last() ) );
 
 	int iIndex = ( pPtr-m_dPool.Begin() )/GetIntElementSize();
-	m_dFree.Add(iIndex);
+	m_dFree.Free ( iIndex );
 }
 
 
@@ -8942,7 +9029,7 @@ static bool HasQwordDupes ( XQNode_t * pNode )
 
 
 ISphRanker * sphCreateRanker ( const XQQuery_t & tXQ, const CSphQuery * pQuery, CSphQueryResult * pResult,
-	const ISphQwordSetup & tTermSetup, const CSphQueryContext & tCtx )
+	const ISphQwordSetup & tTermSetup, const CSphQueryContext & tCtx, const ISphSchema & tSorterSchema )
 {
 	// shortcut
 	const CSphIndex * pIndex = tTermSetup.m_pIndex;
@@ -8958,7 +9045,7 @@ ISphRanker * sphCreateRanker ( const XQQuery_t & tXQ, const CSphQuery * pQuery, 
 	bool bGotDupes = HasQwordDupes ( tXQ.m_pRoot );
 
 	// can we serve this from cache?
-	QcacheEntry_c * pCached = QcacheFind ( pIndex->GetIndexId(), *pQuery );
+	QcacheEntry_c * pCached = QcacheFind ( pIndex->GetIndexId(), *pQuery, tSorterSchema );
 	if ( pCached )
 		return QcacheRanker ( pCached, tTermSetup );
 	SafeRelease ( pCached );
@@ -9290,9 +9377,14 @@ public:
 
 	virtual int GetQwords ( ExtQwordsHash_t & hQwords )
 	{
-		if ( m_pChild )
-			return m_pChild->GetQwords ( hQwords );
-		return -1;
+		if ( !m_pChild )
+			return -1;
+
+		int iChildAtom = m_pChild->GetQwords ( hQwords );
+		if ( iChildAtom<0 )
+			return -1;
+
+		return m_iAtomPos + iChildAtom;
 	}
 
 	virtual void SetQwordsIDF ( const ExtQwordsHash_t & hQwords )
@@ -9558,7 +9650,7 @@ const ExtHit_t * ExtNodeCached_t::GetHitsChunk ( const ExtDoc_t * pMatched )
 		}
 		m_iHitIndex++;
 		m_dHits[iHit] = tCachedHit;
-		m_dHits[iHit].m_uQuerypos = (WORD)( m_dHits[iHit].m_uQuerypos + m_iAtomPos - m_pNode->m_iAtomPos );
+		m_dHits[iHit].m_uQuerypos = (WORD)( tCachedHit.m_uQuerypos + m_iAtomPos - m_pNode->m_iAtomPos );
 		iHit++;
 	}
 

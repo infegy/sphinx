@@ -133,7 +133,7 @@ enum SearchdCommand_e
 /// (shared here because of REPLICATE)
 enum
 {
-	VER_COMMAND_SEARCH		= 0x11E, // 1.30
+	VER_COMMAND_SEARCH		= 0x11F, // 1.31
 	VER_COMMAND_EXCERPT		= 0x104,
 	VER_COMMAND_UPDATE		= 0x103,
 	VER_COMMAND_KEYWORDS	= 0x100,
@@ -441,6 +441,7 @@ struct ServedDesc_t
 {
 	CSphIndex *			m_pIndex;
 	CSphString			m_sIndexPath;
+	CSphString			m_sNewPath;
 	bool				m_bEnabled;		///< to disable index in cases when rotation fails
 	bool				m_bMlock;
 	bool				m_bPreopen;

@@ -44,6 +44,8 @@
 #define MVA_OFFSET_MASK		0x7fffffffUL	// MVA offset mask
 #define MVA_ARENA_FLAG		0x80000000UL	// MVA global-arena flag
 
+#define DEFAULT_MAX_MATCHES 1000
+
 //////////////////////////////////////////////////////////////////////////
 
 const DWORD		INDEX_MAGIC_HEADER			= 0x58485053;		///< my magic 'SPHX' header
@@ -328,6 +330,7 @@ public:
 	bool					GetErrorFlag () const		{ return m_bError; }
 	const CSphString &		GetErrorMessage () const	{ return m_sError; }
 	const CSphString &		GetFilename() const			{ return m_sFilename; }
+	void					ResetError();
 
 #if USE_64BIT
 	SphDocID_t	GetDocid ()		{ return GetOffset(); }
@@ -995,6 +998,50 @@ private:
 	CSphVector<PoolPtrs_t> m_dPool;
 };
 
+class CSphFreeList
+{
+private:
+	CSphTightVector<int>	m_dFree;
+	int						m_iNextFree;
+#ifndef NDEBUG
+	int						m_iSize;
+#endif
+
+public:
+	CSphFreeList ()
+		: m_iNextFree ( 0 )
+#ifndef NDEBUG
+		, m_iSize ( 0 )
+#endif
+	{}
+
+	void Reset ( int iSize )
+	{
+#ifndef NDEBUG
+		m_iSize = iSize;
+#endif
+		m_iNextFree = 0;
+		m_dFree.Reserve ( iSize );
+	}
+
+	int Get ()
+	{
+		int iRes = -1;
+		if ( m_dFree.GetLength () )
+			iRes = m_dFree.Pop ();
+		else
+			iRes = m_iNextFree++;
+		assert ( iRes>=0 && iRes<m_iSize );
+		return iRes;
+	}
+
+	void Free ( int iIndex )
+	{
+		assert ( iIndex>=0 && iIndex<m_iSize );
+		m_dFree.Add ( iIndex );
+	}
+};
+
 //////////////////////////////////////////////////////////////////////////
 // INLINES, FIND_XXX() GENERIC FUNCTIONS
 //////////////////////////////////////////////////////////////////////////
@@ -1609,7 +1656,7 @@ public:
 	virtual void					SetBuffer ( const BYTE * sBuffer, int iLength )	{ m_pTokenizer->SetBuffer ( sBuffer, iLength ); }
 	virtual BYTE *					GetToken ()										{ return m_pTokenizer->GetToken(); }
 
-	virtual bool					WasTokenMultiformDestination ( bool & bHead ) const { return m_pTokenizer->WasTokenMultiformDestination ( bHead ); }
+	virtual bool					WasTokenMultiformDestination ( bool & bHead, int & iDestCount ) const { return m_pTokenizer->WasTokenMultiformDestination ( bHead, iDestCount ); }
 };
 
 
@@ -1634,6 +1681,7 @@ struct CSphReconfigureSettings
 	CSphTokenizerSettings	m_tTokenizer;
 	CSphDictSettings		m_tDict;
 	CSphIndexSettings		m_tIndex;
+	CSphFieldFilterSettings m_tFieldFilter;
 };
 
 struct CSphReconfigureSetup
@@ -1641,6 +1689,7 @@ struct CSphReconfigureSetup
 	ISphTokenizer *		m_pTokenizer;
 	CSphDict *			m_pDict;
 	CSphIndexSettings	m_tIndex;
+	ISphFieldFilter *	m_pFieldFilter;
 
 	CSphReconfigureSetup ();
 	~CSphReconfigureSetup ();
@@ -1728,6 +1777,8 @@ bool			AddFieldLens ( CSphSchema & tSchema, bool bDynamic, CSphString & sError )
 
 /// Get current thread local index - internal do not use
 ISphRtIndex * sphGetCurrentIndexRT();
+
+void			RebalanceWeights ( const CSphFixedVector<int64_t> & dTimers, WORD * pWeights );
 
 // all indexes should produce same terms for same query
 struct SphWordStatChecker_t

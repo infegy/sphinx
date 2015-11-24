@@ -122,7 +122,7 @@ void sphSplit ( CSphVector<CSphString> & dOut, const char * sIn, const char * sB
 }
 
 
-bool sphWildcardMatch ( const char * sString, const char * sPattern )
+static bool sphWildcardMatchRec ( const char * sString, const char * sPattern )
 {
 	if ( !sString || !sPattern )
 		return false;
@@ -178,9 +178,9 @@ bool sphWildcardMatch ( const char * sString, const char * sPattern )
 
 			// could not decide yet
 			// so just recurse both options
-			if ( sphWildcardMatch ( s, p ) )
+			if ( sphWildcardMatchRec ( s, p ) )
 				return true;
-			if ( sphWildcardMatch ( s+1, p ) )
+			if ( sphWildcardMatchRec ( s+1, p ) )
 				return true;
 			return false;
 
@@ -204,7 +204,7 @@ bool sphWildcardMatch ( const char * sString, const char * sPattern )
 				{
 					if ( !*s )
 						return false;
-					if ( *s==*p && sphWildcardMatch ( s+1, p+1 ) )
+					if ( *s==*p && sphWildcardMatchRec ( s+1, p+1 ) )
 						return true;
 					s++;
 				}
@@ -218,12 +218,106 @@ bool sphWildcardMatch ( const char * sString, const char * sPattern )
 		}
 	}
 
+	// eliminate trailing stars
+	while ( *p=='*' )
+		p++;
+
 	// string done
 	// pattern should be either done too, or a trailing star, or a trailing hash
 	return p[0]=='\0'
 		|| ( p[0]=='*' && p[1]=='\0' )
 		|| ( p[0]=='%' && p[1]=='\0' );
 }
+
+
+static bool sphWildcardMatchDP ( const char * sString, const char * sPattern )
+{
+	assert ( sString && sPattern && *sString && *sPattern );
+
+	const char * s = sString;
+	const char * p = sPattern;
+	bool bEsc = false;
+	int iEsc = 0;
+
+	const int iBufCount = 2;
+	const int iBufLenMax = SPH_MAX_WORD_LEN*3+4+1;
+	int dTmp [iBufCount][iBufLenMax];
+	dTmp[0][0] = 1;
+	dTmp[1][0] = 0;
+	for ( int i=0; i<iBufLenMax; i++ )
+		dTmp[0][i] = 1;
+
+	while ( *p )
+	{
+		// count, flag and skip escape char
+		if ( *p=='\\' )
+		{
+			iEsc++;
+			p++;
+			bEsc = true;
+			continue;
+		}
+
+		s = sString;
+		int iPattern = p - sPattern + 1 - iEsc;
+		int iPrev = ( iPattern + 1 ) % iBufCount;
+		int iCur = iPattern % iBufCount;
+
+		// check the 1st wildcard
+		if ( !bEsc && ( *p=='*' || *p=='%' ) )
+		{
+			dTmp[iCur][0] = dTmp[iPrev][0];
+
+		} else
+		{
+			dTmp[iCur][0] = 0;
+		}
+
+		while ( *s )
+		{
+			int j = s - sString + 1;
+			if ( !bEsc && *p=='*' )
+			{
+				dTmp[iCur][j] = dTmp[iPrev][j-1] || dTmp[iCur][j-1] || dTmp[iPrev][j];
+			} else if ( !bEsc && *p=='%' )
+			{
+				dTmp[iCur][j] = dTmp[iPrev][j-1] || dTmp[iPrev][j];
+			} else if ( *p==*s || ( !bEsc && *p=='?' ) )
+			{
+				dTmp[iCur][j] = dTmp[iPrev][j-1];
+			} else
+			{
+				dTmp[iCur][j] = 0;
+			}
+			s++;
+		}
+		p++;
+		bEsc = false;
+	}
+
+	return ( dTmp[( p-sPattern-iEsc ) % iBufCount][s-sString]!=0 );
+}
+
+
+bool sphWildcardMatch ( const char * sString, const char * sPattern )
+{
+	if ( !sString || !sPattern || !*sString || !*sPattern )
+		return false;
+
+	int iStars = 0;
+	const char * p = sPattern;
+	while ( *p )
+	{
+		iStars += ( *p=='*' );
+		p++;
+	}
+
+	if ( iStars>10 || ( iStars>5 && strlen ( sString )>17 ) )
+		return sphWildcardMatchDP ( sString, sPattern );
+	else
+		return sphWildcardMatchRec ( sString, sPattern );
+}
+
 
 //////////////////////////////////////////////////////////////////////////
 
@@ -2454,6 +2548,52 @@ bool CSphDynamicLibrary::LoadSymbol ( const char *, void ** ) { return false; }
 bool CSphDynamicLibrary::LoadSymbols ( const char **, void ***, int ) { return false; }
 
 #endif
+
+
+void RebalanceWeights ( const CSphFixedVector<int64_t> & dTimers, WORD * pWeights )
+{
+	assert ( dTimers.GetLength () );
+	int64_t iSum = 0;
+	int iCounters = 0;
+	ARRAY_FOREACH ( i, dTimers )
+	{
+		iSum += dTimers[i];
+		iCounters += ( dTimers[i]>0 );
+	}
+
+	// no statistics, all timers bad, keep previous weights
+	if ( iSum<=0 )
+		return;
+
+	// in case of mirror without response still set small probability to it
+	const float fEmptiesPercent = 0.1f;
+	int iEmpties = dTimers.GetLength() - iCounters;
+
+	// balance weights
+	int64_t iCheck = 0;
+	ARRAY_FOREACH ( i, dTimers )
+	{
+		// mirror weight is inverse of timer \ query time
+		float fWeight = 1.0f - (float)dTimers[i] / iSum;
+
+		// subtract coef-empty percent to get sum eq to 1.0
+		if ( iEmpties )
+			fWeight = fWeight - fWeight * fEmptiesPercent;
+
+		// mirror without response
+		if ( !dTimers[i] )
+			fWeight = fEmptiesPercent / iEmpties;
+		else if ( iCounters==1 ) // case when only one mirror has valid counter
+			fWeight = 1.0f - fEmptiesPercent;
+
+		int iWeight = int( fWeight * 65535.0f );
+		assert ( iWeight>=0 && iWeight<=65535 );
+		pWeights[i] = (WORD)iWeight;
+		iCheck += pWeights[i];
+	}
+	assert ( iCheck<=65535 );
+}
+
 
 //
 // $Id$

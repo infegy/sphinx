@@ -965,6 +965,47 @@ void BenchExpr ()
 //////////////////////////////////////////////////////////////////////////
 
 
+struct CmpAtomPos_fn
+{
+	bool IsLess ( const XQKeyword_t * pA, const XQKeyword_t * pB )
+	{
+		return pA->m_iAtomPos<pB->m_iAtomPos;
+	}
+};
+
+
+static void CheckQuerySoftSpace ( const XQNode_t * pNode, const int * pQPos, int iCount )
+{
+	assert ( pNode );
+
+	CSphVector< const XQKeyword_t * > dTerms;
+	CSphVector<const XQNode_t *> dChildren;
+
+	dChildren.Add ( pNode );
+
+	ARRAY_FOREACH ( i, dChildren )
+	{
+		const XQNode_t * pChild = dChildren[i];
+		ARRAY_FOREACH ( j, pChild->m_dChildren )
+			dChildren.Add ( pChild->m_dChildren[j] );
+
+		ARRAY_FOREACH ( j, pChild->m_dWords )
+			dTerms.Add ( pChild->m_dWords.Begin() + j );
+	}
+
+	dTerms.Sort ( CmpAtomPos_fn() );
+
+	assert ( iCount==dTerms.GetLength() );
+
+	ARRAY_FOREACH ( i, dTerms )
+	{
+		assert ( dTerms[i]->m_iAtomPos==pQPos[i] );
+	}
+	assert ( dTerms[0]->m_sWord=="me" );
+	assert ( dTerms.Last()->m_sWord=="off" );
+}
+
+
 void TestQueryParser ()
 {
 	CSphString sError;
@@ -1045,6 +1086,46 @@ void TestQueryParser ()
 		assert ( sReconst==dTest[i].m_sReconst );
 
 		printf ( "ok\n" );
+	}
+
+	// NEAR with NOT operator argument
+	{
+		XQQuery_t tQuery;
+		bool bOK = sphParseExtendedQuery ( tQuery, "me -test NEAR/2 off", NULL, pTokenizer.Ptr (), &tSchema, pDict.Ptr (), tTmpSettings );
+		assert ( !bOK && !tQuery.m_pRoot );
+	}
+
+	// soft whitespace
+	{
+		bool bOK = false;
+		{
+			XQQuery_t tQuery;
+			bOK = sphParseExtendedQuery ( tQuery, "me [ off", NULL, pTokenizer.Ptr (), &tSchema, pDict.Ptr (), tTmpSettings );
+			assert ( bOK );
+			int dQpos[] = { 1, 2 };
+			CheckQuerySoftSpace ( tQuery.m_pRoot, dQpos, sizeof(dQpos)/sizeof(dQpos[0]) );
+		}
+		{
+			XQQuery_t tQuery;
+			bOK = sphParseExtendedQuery ( tQuery, "me [ ,, &&,[ off", NULL, pTokenizer.Ptr (), &tSchema, pDict.Ptr (), tTmpSettings );
+			assert ( bOK );
+			int dQpos[] = { 1, 2 };
+			CheckQuerySoftSpace ( tQuery.m_pRoot, dQpos, sizeof(dQpos)/sizeof(dQpos[0]) );
+		}
+		{
+			XQQuery_t tQuery;
+			bOK = sphParseExtendedQuery ( tQuery, "me \xE7\xA7\x81\xE3\x81\xAF\xE3\x82\xAC off", NULL, pTokenizer.Ptr (), &tSchema, pDict.Ptr (), tTmpSettings );
+			assert ( bOK );
+			int dQpos[] = { 1, 3 };
+			CheckQuerySoftSpace ( tQuery.m_pRoot, dQpos, sizeof(dQpos)/sizeof(dQpos[0]) );
+		}
+		{
+			XQQuery_t tQuery;
+			bOK = sphParseExtendedQuery ( tQuery, "me \xE7\xA7\x81\xE3\x81\xAF\xE3\x82\xAC \xE7\xA7\x81\xE3\x81\xAF\xE3\x82\xAC \xE7\xA7\x81\xE3\x81\xAF\xE3\x82\xAC off", NULL, pTokenizer.Ptr (), &tSchema, pDict.Ptr (), tTmpSettings );
+			assert ( bOK );
+			int dQpos[] = { 1, 3 };
+			CheckQuerySoftSpace ( tQuery.m_pRoot, dQpos, sizeof(dQpos)/sizeof(dQpos[0]) );
+		}
 	}
 }
 
@@ -2369,8 +2450,7 @@ void TestRTWeightBoundary ()
 			if ( !pSrc->m_tDocInfo.m_uDocID )
 				break;
 
-			CSphScopedPtr<ISphTokenizer> pTokenizer ( pIndex->CloneIndexingTokenizer() );
-			pIndex->AddDocument ( pTokenizer.Ptr(), pSrc->GetFieldCount(), pSrc->GetFields(), pSrc->m_tDocInfo, false, sFilter, NULL, dMvas, sError, sWarning, NULL );
+			pIndex->AddDocument ( pIndex->CloneIndexingTokenizer(), pSrc->GetFieldCount(), pSrc->GetFields(), pSrc->m_tDocInfo, false, sFilter, NULL, dMvas, sError, sWarning, NULL );
 			pIndex->Commit ( NULL, NULL );
 		}
 
@@ -2563,8 +2643,7 @@ void TestRTSendVsMerge ()
 		if ( !pSrc->m_tDocInfo.m_uDocID )
 			break;
 
-		CSphScopedPtr<ISphTokenizer> pTokenizer ( pIndex->CloneIndexingTokenizer() );
-		pIndex->AddDocument ( pTokenizer.Ptr(), pSrc->GetFieldCount(), pSrc->GetFields(), pSrc->m_tDocInfo, false, sFilter, NULL, dMvas, sError, sWarning, NULL );
+		pIndex->AddDocument ( pIndex->CloneIndexingTokenizer(), pSrc->GetFieldCount(), pSrc->GetFields(), pSrc->m_tDocInfo, false, sFilter, NULL, dMvas, sError, sWarning, NULL );
 		if ( pSrc->m_tDocInfo.m_uDocID==350 )
 		{
 			pIndex->Commit ( NULL, NULL );
@@ -2675,8 +2754,7 @@ void TestRankerFactors ()
 		if ( !pSrc->m_tDocInfo.m_uDocID )
 			break;
 
-		CSphScopedPtr<ISphTokenizer> pTokenizer ( pIndex->CloneIndexingTokenizer() );
-		pIndex->AddDocument ( pTokenizer.Ptr(), pSrc->GetFieldCount(), pSrc->GetFields(), pSrc->m_tDocInfo, false, sFilter, NULL, dMvas, sError, sWarning, NULL );
+		pIndex->AddDocument ( pIndex->CloneIndexingTokenizer(), pSrc->GetFieldCount(), pSrc->GetFields(), pSrc->m_tDocInfo, false, sFilter, NULL, dMvas, sError, sWarning, NULL );
 	}
 	pIndex->Commit ( NULL, NULL );
 	pSrc->Disconnect();
@@ -2869,6 +2947,85 @@ void TestSpanSearch()
 
 //////////////////////////////////////////////////////////////////////////
 
+static void TestRebalance_fn ( DWORD * pData, int iLen, int iStride, int iWeights )
+{
+	assert ( ( iLen%iStride )==0 );
+	iLen /= iStride;
+	CSphFixedVector<int64_t> dTimers ( iWeights );
+	CSphFixedVector<WORD> dWeights ( iWeights );
+	for ( int i=0; i<iLen; i++ )
+	{
+		for ( int j=0; j<iWeights; j++ )
+		{
+			dWeights[j] = (WORD)pData[ i * iStride + j ];
+			dTimers[j] = pData[ i * iStride + iWeights + j ];
+		}
+
+		RebalanceWeights ( dTimers, dWeights.Begin() );
+
+		for ( int j=0; j<iWeights; j++ )
+		{
+			//printf ( "%s%d%s", j>0 ? ", " : "", dWeights[j], j+1==iWeights ? "\n" : "" );
+			assert ( dWeights[j]==pData [ i * iStride + iWeights * 2 + j ] );
+		}
+	}
+}
+
+void TestRebalance()
+{
+	printf ( "testing rebalance... " );
+
+	/* reference captured on live box, ie how it was
+	//					old weights,	timers,				new weights
+	DWORD dData[] = {	32395, 33139,	228828, 186751,		29082, 36452,
+						29082, 36452,	218537, 207608,		28255, 37279,
+						28255, 37279,	194305, 214800,		29877, 35657,
+						29877, 35657,	190062, 207614,		31318, 34216,
+						31318, 34216,	201162, 221708,		32910, 32624,
+						32910, 32624,	193441, 247379,		36917, 28617,
+						36917, 28617,	194910, 223202,		39080, 26454,
+						39080, 26454,	228274, 361018,		45892, 19642,
+						45892, 19642,	223009, 275050,		48651, 16883,
+						48651, 16883,	205340, 279008,		52202, 13332,
+						52202, 13332,	213189, 201466,		51592, 13942,
+						51592, 13942,	210235, 197584,		50899, 14635,
+						48921, 16613,	207860, 318349,		53641, 11893,
+						53641, 11893,	204124, 487120,		59963, 5571,
+						59963, 5571,	202851, 412733,		62140, 3394,
+	}; */
+	//					old weights,	timers,				new weights
+	DWORD dData1[] = {	32395, 33139,	228828, 186751,		29449, 36085,
+						29082, 36452,	218537, 207608,		31927, 33607,
+						28255, 37279,	194305, 214800,		34409, 31125,
+						29877, 35657,	190062, 207614,		34213, 31321,
+						31318, 34216,	201162, 221708,		34359, 31175,
+						32910, 32624,	193441, 247379,		36776, 28758,
+						36917, 28617,	194910, 223202,		34984, 30550,
+						39080, 26454,	228274, 361018,		40148, 25386,
+						45892, 19642,	223009, 275050,		36191, 29343,
+						48651, 16883,	205340, 279008,		37751, 27783,
+						52202, 13332,	213189, 201466,		31841, 33693,
+						51592, 13942,	210235, 197584,		31751, 33783,
+						48921, 16613,	207860, 318349,		39647, 25887,
+						53641, 11893,	204124, 487120,		46182, 19352,
+						59963, 5571,	202851, 412733,		43939, 21595,
+	};
+	TestRebalance_fn ( dData1, sizeof(dData1) / sizeof(dData1[0]), 6, 2 );
+
+	DWORD dData2[] ={ 0, 1,				0, 18469,			6553, 58981 };
+	TestRebalance_fn ( dData2, sizeof(dData2) / sizeof(dData2[0]), 6, 2 );
+
+	DWORD dData3[] ={ 0, 1, 2, 3,		0, 0, 0, 18469,		2184, 2184, 2184, 58981 };
+	TestRebalance_fn ( dData3, sizeof ( dData3 ) / sizeof ( dData3[0] ), 12, 4 );
+
+	DWORD dData4[] ={ 0, 1, 2,			7100, 0, 18469,		42603, 6553, 16377 };
+	TestRebalance_fn ( dData4, sizeof ( dData4 ) / sizeof ( dData4[0] ), 9, 3 );
+
+	printf ( "ok\n" );
+}
+
+//////////////////////////////////////////////////////////////////////////
+
 static const char * CORPUS = "corpus.txt";
 const int POOLSIZE = 80*1048576;
 const int GAP = 4;
@@ -3010,6 +3167,7 @@ void BenchStemmer ()
 void TestWildcards()
 {
 	printf ( "testing wildcards... " );
+
 	assert ( sphWildcardMatch ( "abc", "abc" ) );
 	assert ( sphWildcardMatch ( "abc", "?bc" ) );
 	assert ( sphWildcardMatch ( "abc", "a?c" ) );
@@ -3055,6 +3213,102 @@ void TestWildcards()
 	assert ( sphWildcardMatch ( "a*b", "a\\*b" ) );
 	assert ( !sphWildcardMatch ( "acb", "a\\*b" ) );
 	assert ( !sphWildcardMatch ( "acdeb", "a\\*b" ) );
+
+	// new cases recursive slow cases
+	assert ( !sphWildcardMatch ( "-----this-li", "-*-*-*-" ) );
+	assert ( !sphWildcardMatch ( "---------------------------------this-li", "-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-" ) );
+	assert ( sphWildcardMatch ( "---------------------------------this-li-", "-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-" ) );
+	assert ( sphWildcardMatch ( "---------------------------------this-li", "-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*i" ) );
+	assert ( sphWildcardMatch ( "---------------------------------this-li", "-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*" ) );
+	assert ( sphWildcardMatch ( "---------------------------------this-li", "-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*s-*i" ) );
+	assert ( !sphWildcardMatch ( "---------------------------------this-li", "-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-s-*i" ) );
+	assert ( !sphWildcardMatch ( "---------------------------------this-li", "-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*x-*i" ) );
+	assert ( !sphWildcardMatch ( "--------------------------this-li--p---", "-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-z-*-" ) );
+
+	// cases with repeating character sequences
+	assert ( sphWildcardMatch ( "abcccd", "*ccd" ) );
+	assert ( sphWildcardMatch ( "mississipissippi", "*issip*ss*" ) );
+	assert ( !sphWildcardMatch ( "xxxx*zzzzzzzzy*f", "xxxx*zzy*fffff" ) );
+	assert ( sphWildcardMatch ( "xxxx*zzzzzzzzy*f", "xxx*zzy*f" ) );
+	assert ( !sphWildcardMatch ( "xxxxzzzzzzzzyf", "xxxx*zzy*fffff" ) );
+	assert ( sphWildcardMatch ( "xxxxzzzzzzzzyf", "xxxx*zzy*f" ) );
+	assert ( sphWildcardMatch ( "xyxyxyzyxyz", "xy*z*xyz" ) );
+	assert ( sphWildcardMatch ( "mississippi", "*sip*" ) );
+	assert ( sphWildcardMatch ( "xyxyxyxyz", "xy*xyz" ) );
+	assert ( sphWildcardMatch ( "mississippi", "mi*sip*" ) );
+	assert ( sphWildcardMatch ( "ababac", "*abac*" ) );
+	assert ( sphWildcardMatch ( "ababac", "*abac*" ) );
+	assert ( sphWildcardMatch ( "aaazz", "a*zz*" ) );
+	assert ( !sphWildcardMatch ( "a12b12", "*12*23" ) );
+	assert ( !sphWildcardMatch ( "a12b12", "a12b" ) );
+	assert ( sphWildcardMatch ( "a12b12", "*12*12*" ) );
+
+	// wildcard in the tame string
+	assert ( sphWildcardMatch ( "*", "*" ) );
+	assert ( sphWildcardMatch ( "a*abab", "a*b" ) );
+	assert ( sphWildcardMatch ( "a*r", "a*" ) );
+	assert ( !sphWildcardMatch ( "a*ar", "a*aar" ) );
+
+	// double wildcard
+	assert ( sphWildcardMatch ( "XYXYXYZYXYz", "XY*Z*XYz" ) );
+	assert ( sphWildcardMatch ( "missisSIPpi", "*SIP*" ) );
+	assert ( sphWildcardMatch ( "mississipPI", "*issip*PI" ) );
+	assert ( sphWildcardMatch ( "xyxyxyxyz", "xy*xyz" ) );
+	assert ( sphWildcardMatch ( "miSsissippi", "mi*sip*" ) );
+	assert ( !sphWildcardMatch ( "miSsissippi", "mi*Sip*" ) );
+	assert ( sphWildcardMatch ( "abAbac", "*Abac*" ) );
+	assert ( sphWildcardMatch ( "abAbac", "*Abac*" ) );
+	assert ( sphWildcardMatch ( "aAazz", "a*zz*" ) );
+	assert ( !sphWildcardMatch ( "A12b12", "*12*23" ) );
+	assert ( sphWildcardMatch ( "a12B12", "*12*12*" ) );
+	assert ( sphWildcardMatch ( "oWn", "*oWn*" ) );
+
+	// mixed wildcard
+	assert ( sphWildcardMatch ( "a", "*?" ) );
+	assert ( sphWildcardMatch ( "ab", "*?" ) );
+	assert ( sphWildcardMatch ( "abc", "*?" ) );
+
+	// wildcard false positives
+	assert ( !sphWildcardMatch ( "a", "??" ) );
+	assert ( sphWildcardMatch ( "ab", "?*?" ) );
+	// due to loop just right after case '*'
+	// skip all the extra stars and question marks
+	// this case has opposite result
+	assert ( !sphWildcardMatch ( "ab", "*?*?*" ) );
+	assert ( sphWildcardMatch ( "abc", "?**?*?" ) );
+	assert ( !sphWildcardMatch ( "abc", "?**?*&?" ) );
+	assert ( sphWildcardMatch ( "abcd", "?b*??" ) );
+	assert ( !sphWildcardMatch ( "abcd", "?a*??" ) );
+	assert ( sphWildcardMatch ( "abcd", "?**?c?" ) );
+	assert ( !sphWildcardMatch ( "abcd", "?**?d?" ) );
+	assert ( sphWildcardMatch ( "abcde", "?*b*?*d*?" ) );
+
+	// single char match
+	assert ( sphWildcardMatch ( "bLah", "bL?h" ) );
+	assert ( !sphWildcardMatch ( "bLaaa", "bLa?" ) );
+	assert ( sphWildcardMatch ( "bLah", "bLa?" ) );
+	assert ( !sphWildcardMatch ( "bLaH", "?Lah" ) );
+	assert ( sphWildcardMatch ( "bLaH", "?LaH" ) );
+
+	// many wildcard
+	assert ( sphWildcardMatch ( "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab", "a*a*a*a*a*a*aa*aaa*a*a*b" ) );
+	assert ( sphWildcardMatch ( "abababababababababababababababababababaacacacacacacacadaeafagahaiajakalaaaaaaaaaaaaaaaaaffafagaagggagaaaaaaaab", "*a*b*ba*ca*a*aa*aaa*fa*ga*b*" ) );
+	assert ( !sphWildcardMatch ( "abababababababababababababababababababaacacacacacacacadaeafagahaiajakalaaaaaaaaaaaaaaaaaffafagaagggagaaaaaaaab", "*a*b*ba*ca*a*x*aaa*fa*ga*b*" ) );
+	assert ( !sphWildcardMatch ( "abababababababababababababababababababaacacacacacacacadaeafagahaiajakalaaaaaaaaaaaaaaaaaffafagaagggagaaaaaaaab", "*a*b*ba*ca*aaaa*fa*ga*gggg*b*" ) );
+	assert ( sphWildcardMatch ( "abababababababababababababababababababaacacacacacacacadaeafagahaiajakalaaaaaaaaaaaaaaaaaffafagaagggagaaaaaaaab", "*a*b*ba*ca*aaaa*fa*ga*ggg*b*" ) );
+	assert ( sphWildcardMatch ( "aaabbaabbaab", "*aabbaa*a*" ) );
+	assert ( sphWildcardMatch ( "a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*", "a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*" ) );
+	assert ( sphWildcardMatch ( "aaaaaaaaaaaaaaaaa", "*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*" ) );
+	assert ( !sphWildcardMatch ( "aaaaaaaaaaaaaaaa", "*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*" ) );
+	assert ( !sphWildcardMatch ( "abc*abcd*abcde*abcdef*abcdefg*abcdefgh*abcdefghi*abcdefghij*abcdefghijk*abcdefghijkl*abcdefghijklm*abcdefghijklmn", "abc*abc*abc*abc*abc*abc*abc*abc*abc*abc*abc*abc*abc*abc*abc*abc*abc*" ) );
+	assert ( sphWildcardMatch ( "abc*abcd*abcde*abcdef*abcdefg*abcdefgh*abcdefghi*abcdefghij*abcdefghijk*abcdefghijkl*abcdefghijklm*abcdefghijklmn", "abc*abc*abc*abc*abc*abc*abc*abc*abc*abc*abc*abc*" ) );
+	assert ( !sphWildcardMatch ( "abc*abcd*abcd*abc*abcd", "abc*abc*abc*abc*abc" ) );
+	assert ( sphWildcardMatch ( "abc*abcd*abcd*abc*abcd*abcd*abc*abcd*abc*abc*abcd", "abc*abc*abc*abc*abc*abc*abc*abc*abc*abc*abcd" ) );
+	assert ( sphWildcardMatch ( "abc", "********a********b********c********" ) );
+	assert ( !sphWildcardMatch ( "********a********b********c********", "abc" ) );
+	assert ( !sphWildcardMatch ( "abc", "********a********b********b********" ) );
+	assert ( sphWildcardMatch ( "*abc*", "***a*b*c***" ) );
+
 	printf ( "ok\n" );
 }
 
@@ -3824,6 +4078,7 @@ int main ()
 	TestArabicStemmer();
 	TestSource ();
 	TestRankerFactors ();
+	TestRebalance();
 #endif
 
 	unlink ( g_sTmpfile );

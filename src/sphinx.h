@@ -259,12 +259,6 @@ void			sphInterruptNow();
 /// check if we got interrupted
 bool			sphInterrupted();
 
-#if !USE_WINDOWS
-/// set process info
-void			sphSetProcessInfo ( bool bHead );
-#endif
-
-
 /// initialize IO statistics collecting
 bool			sphInitIOStats ();
 
@@ -645,7 +639,7 @@ public:
 
 	/// was last token a part of multi-wordforms destination
 	/// head parameter might be useful to distinguish between sequence of different multi-wordforms
-	virtual bool					WasTokenMultiformDestination ( bool & bHead ) const = 0;
+	virtual bool					WasTokenMultiformDestination ( bool & bHead, int & iDestCount ) const = 0;
 
 	/// check whether this token is a generated morphological guess
 	ESphTokenMorph					GetTokenMorph() const { return m_eTokenMorph; }
@@ -2100,6 +2094,7 @@ protected:
 
 		CSphVector<BYTE*> m_dTmpFieldStorage;
 		CSphVector<BYTE*> m_dTmpFieldPtrs;
+		CSphVector<BYTE> m_dFiltered;
 
 		int m_iStartPos;
 		Hitpos_t m_iHitPos;
@@ -2510,7 +2505,8 @@ enum ESphFilter
 	SPH_FILTER_FLOATRANGE	= 2,	///< filter by float range
 	SPH_FILTER_STRING		= 3,	///< filter by string value
 	SPH_FILTER_NULL			= 4,	///< filter by NULL
-	SPH_FILTER_USERVAR		= 5		///< filter by @uservar
+	SPH_FILTER_USERVAR		= 5,	///< filter by @uservar
+	SPH_FILTER_STRING_LIST	= 6		///< filter by string list
 };
 
 
@@ -2545,7 +2541,7 @@ public:
 		float			m_fMaxValue;	///< range max
 	};
 	CSphVector<SphAttr_t>	m_dValues;	///< integer values set
-	CSphString			m_sRefString;	///< reference string value
+	CSphVector<CSphString>	m_dStrings;	///< string values
 
 public:
 						CSphFilterSettings ();
@@ -2559,7 +2555,7 @@ public:
 	bool				operator == ( const CSphFilterSettings & rhs ) const;
 	bool				operator != ( const CSphFilterSettings & rhs ) const { return !( (*this)==rhs ); }
 
-	uint64_t			GetHash() const;
+	uint64_t			GetHash ( uint64_t uPrevHash ) const;
 
 protected:
 	const SphAttr_t *	m_pValues;		///< external value array
